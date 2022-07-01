@@ -180,10 +180,12 @@ def main(
         # fill in -1 for messages that aren't part of threads
         df["thread_id"] = df["thread_id"].fillna(-1)
 
+        channel_idx = df["channel"] == channel["name"]
+        thread_idx = df["thread_id"] != -1
         print(f"Channel: {channel['name']}")
-        print(f"\tUsers: {df['user'].nunique():,}")
-        print(f"\tMessages: {df.shape[0]:,}")
-        print(f"\tThreads: {df['thread_id'].nunique():,}")
+        print(f"\tUsers: {df.loc[channel_idx, 'user'].nunique():,}")
+        print(f"\tMessages: {df.loc[channel_idx].shape[0]:,}")
+        print(f"\tThreads: {df.loc[channel_idx & thread_idx, 'thread_id'].nunique():,}")
 
         # # number messages in a thread
         # thread_message_id = (
