@@ -118,7 +118,7 @@ def concat_prompt_completion(
 def main(
     export_dir: str,
     display_name: str,
-    n_prior: int = 5,
+    n_prior: int = 2,
     prepend_channel: bool = True,
     prepend_sender: bool = True,
     sender_type: str = "user",
@@ -218,7 +218,7 @@ def main(
     )
     print("\tDone")
 
-    path_out = export_path / "data" / display_name
+    path_out = export_path / "parser_data" / display_name
     if not path_out.exists():
         path_out.mkdir(parents=True, exist_ok=True)
 
