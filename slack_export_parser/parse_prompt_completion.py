@@ -204,7 +204,7 @@ def concat_prompt_completion(
 
     # Remove any occurrences of the prompt end token
     df_completion["prompt"] = df_completion["prompt"].apply(
-        lambda x: x.replace(PROMPT_END_TOKEN, " ")
+        lambda x: x.replace(PROMPT_END_TOKEN.strip(), " ")
     )
     # Append end token to prompt
     df_completion["prompt"] = df_completion["prompt"].apply(
@@ -213,7 +213,7 @@ def concat_prompt_completion(
 
     # Remove any occurrences of the completion end token
     df_completion["completion"] = df_completion["completion"].apply(
-        lambda x: x.replace(COMPLETION_END_TOKEN, " ")
+        lambda x: x.replace(COMPLETION_END_TOKEN.strip(), " ")
     )
     # Add a whitespace character to the beginning of the completion and append end token
     # to completion
