@@ -6,6 +6,95 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+PROMPT_END_TOKEN = "\n\n###\n\n"
+COMPLETION_END_TOKEN = "<e>"
+
+
+def parse_channel_data(export_path: Path, channels: list[dict]):
+    cols = [
+        "channel",
+        "thread_ts",
+        "ts",
+        "user",
+        "display_name",
+        "text",
+        # "reactions",
+    ]
+
+    slack_df = pd.DataFrame()
+
+    for channel in channels:
+        channel_df = pd.DataFrame()
+
+        day_files = sorted((export_path / channel["name"]).glob("*.json"))
+        print(f"Parsing channel {channel['name']}: {len(day_files):,} files")
+        for day_file in tqdm(day_files):
+            with open(day_file, "r") as fp:
+                day_data = json.load(fp)
+
+            _df = pd.json_normalize(day_data, sep="__")
+            _df = _df.rename(columns={"user_profile__display_name": "display_name"})
+            if "subtype" not in _df:
+                _df["subtype"] = np.nan
+            _df["text"] = _df["text"].astype(str)
+            _df["channel"] = channel["name"]
+            _df = _df.loc[(_df["type"] == "message") & _df["subtype"].isna()]
+            _df = _df.reindex(columns=cols)
+            channel_df = pd.concat([channel_df, _df], axis="index", ignore_index=True)
+
+        # User display name is nan when a file is attached, fill in the display name
+        missing_mask = channel_df["display_name"].isna()
+        users = (
+            channel_df.dropna(subset="display_name")
+            .groupby(by=["user"])["display_name"]
+            .first()
+        )
+        channel_df.loc[missing_mask, "display_name"] = channel_df.loc[
+            missing_mask, "user"
+        ].map(users)
+
+        # Number threads
+        thread_id = (
+            channel_df.dropna(subset=["thread_ts"]).groupby(by=["thread_ts"]).ngroup()
+        )
+        channel_df["thread_id"] = thread_id
+        # Fill in -1 for messages that aren't part of threads
+        channel_df["thread_id"] = channel_df["thread_id"].fillna(-1)
+
+        # channel_idx = channel_df["channel"] == channel["name"]
+        thread_idx = channel_df["thread_id"] != -1
+        print(f"Channel: {channel['name']}")
+        print(f"\tUsers: {channel_df['user'].nunique():,}")
+        print(f"\tMessages: {channel_df.shape[0]:,}")
+        print(f"\tThreads: {channel_df.loc[thread_idx, 'thread_id'].nunique():,}")
+
+        # # Number messages in a thread
+        # thread_message_id = (
+        #     channel_df.dropna(subset=["thread_ts"]).groupby(by=["thread_ts"]).cumcount()
+        # )
+        # channel_df["thread_message_id"] = thread_message_id
+
+        # We're going to groupby thread_id to easily collect prompt and response. A
+        # thread's parent message can be the prompt to a completion that wasn't
+        # threaded, or a completion to a prior message. therefore, add a duplicate
+        # message without thread_id
+        thread_parents = channel_df.loc[
+            channel_df["ts"] == channel_df["thread_ts"]
+        ].copy()
+        thread_parents["thread_ts"] = np.nan
+        channel_df = pd.concat(
+            [channel_df, thread_parents], axis="index", ignore_index=True
+        )
+
+        slack_df = pd.concat([slack_df, channel_df], axis="index", ignore_index=True)
+
+    # Augment user tag so Slack will interpret it
+    slack_df["user"] = slack_df["user"].apply(lambda x: f"<@{x}>")
+
+    slack_df = slack_df.sort_values(by=["ts"]).reset_index(drop=True)
+
+    return slack_df
+
 
 def get_prompt_completion(
     df: pd.DataFrame,
@@ -14,8 +103,10 @@ def get_prompt_completion(
 ) -> pd.DataFrame:
     """Parse a dataframe into prompt and completion
 
-    a user's own message can be a prompt for their completion
+    A user's own message can be a prompt for their completion
     """
+    print("Creating prompt and completion...")
+
     prompt_completion = pd.DataFrame()
     for _, group in df.groupby("thread_id"):
         user_idx = group["display_name"] == display_name
@@ -44,7 +135,7 @@ def get_prompt_completion(
         .reset_index(drop=True)
     )
 
-    # number prompts sequentially
+    # Number prompts sequentially
     prompt_completion["prompt_id"] = prompt_completion.groupby(
         by=["prompt_id"]
     ).ngroup()
@@ -64,6 +155,8 @@ def get_prompt_completion(
 
     prompt_completion = prompt_completion.reindex(columns=cols)
 
+    print("\tDone")
+
     return prompt_completion
 
 
@@ -73,17 +166,19 @@ def concat_prompt_completion(
     prepend_sender: bool,
     sender_type: str,
 ) -> pd.DataFrame:
+    print("Concatenating prompt and completion...")
+
     _df = prompt_and_completion.copy()
 
     prompt_idx = _df["type"] == "prompt"
     completion_idx = _df["type"] == "completion"
 
-    # include text
+    # Include text
     cols = ["text"]
-    # optionally add sender
+    # Optionally add sender
     if prepend_sender:
         cols = [sender_type] + cols
-    # optionally add channel
+    # Optionally add channel
     if prepend_channel:
         cols = ["channel"] + cols
 
@@ -91,38 +186,79 @@ def concat_prompt_completion(
         _df.loc[prompt_idx, cols].fillna("").apply(lambda x: " ".join(x), axis=1)
     )
 
-    # join all prompt messages
+    # Join all prompt messages
     prompts = (
         _df.loc[prompt_idx]
         .groupby(by=["prompt_id"], as_index=False)["prompt"]
         .apply(lambda x: " ".join(x))
     )
 
-    # select the completion rows
+    # Select the completion rows
     df_completion = _df.loc[completion_idx].copy()
     df_completion = df_completion.drop(columns=["prompt"])
     df_completion = df_completion.rename(columns={"text": "completion"})
 
-    # add prompts
+    # Add prompts
     df_completion = df_completion.loc[completion_idx].merge(
         prompts, how="inner", on="prompt_id"
     )
 
-    # append this UID to the end of the prompt
-    assert df_completion[sender_type].unique().shape[0] == 1
-    user = df_completion[sender_type].unique().tolist()[0]
-    df_completion["prompt"] = df_completion["prompt"].apply(lambda x: f"{x} {user}:")
+    # assert df_completion[sender_type].unique().shape[0] == 1
+    # PROMPT_END_TOKEN = df_completion[sender_type].unique().tolist()[0]
 
-    # append end token to completion
-    df_completion["completion"] = df_completion["completion"].apply(
-        lambda x: f"{x} <e>"
+    # Remove any occurrences of the prompt end token
+    df_completion["prompt"] = df_completion["prompt"].apply(
+        lambda x: x.replace(PROMPT_END_TOKEN, " ")
+    )
+    # Append end token to prompt
+    df_completion["prompt"] = df_completion["prompt"].apply(
+        lambda x: f"{x} {PROMPT_END_TOKEN}"
     )
 
-    # final column selection
+    # Remove any occurrences of the completion end token
+    df_completion["completion"] = df_completion["completion"].apply(
+        lambda x: x.replace(COMPLETION_END_TOKEN, " ")
+    )
+    # Add a whitespace character to the beginning of the completion and append end token
+    # to completion
+    df_completion["completion"] = df_completion["completion"].apply(
+        lambda x: f" {x} {COMPLETION_END_TOKEN}"
+    )
+
+    # Final column selection
     cols = ["channel", "ts", "user", "display_name", "completion", "prompt"]
     df_completion = df_completion.reindex(columns=cols)
 
+    print("\tDone")
+
     return df_completion
+
+
+def save_data(
+    df: pd.DataFrame, export_path: Path, display_name: str, deduplicate: bool = True
+):
+    path_out = export_path / "parser_data" / display_name
+    if not path_out.exists():
+        path_out.mkdir(parents=True, exist_ok=True)
+
+    if deduplicate:
+        n_duplicates = df.duplicated(subset=["prompt", "completion"]).sum()
+        print(f"Dropping {n_duplicates:,} duplicate rows out of {df.shape[0]:,} total")
+        df = df.drop_duplicates(subset=["prompt", "completion"])
+
+    print(f"For user {display_name}, found {df.shape[0]:,} prompts and completions")
+
+    # Save parquet
+    parquet_out = path_out / "prompt_completion.parquet"
+    print(f"Saving file: {parquet_out}")
+    df.to_parquet(parquet_out)
+    print("\tDone")
+
+    # Save jsonl
+    jsonl_out = path_out / "prompt_completion.jsonl"
+    print(f"Saving file: {jsonl_out}")
+    df[["prompt", "completion"]].to_json(jsonl_out, orient="records", lines=True)
+    print("\tDone")
 
 
 def main(
@@ -143,106 +279,20 @@ def main(
     with open(export_path / "channels.json", "r") as fp:
         channels = json.load(fp)
 
-    cols = [
-        "channel",
-        "thread_ts",
-        "ts",
-        "user",
-        "display_name",
-        "text",
-        # "reactions",
-    ]
+    df = parse_channel_data(export_path, channels)
 
-    df = pd.DataFrame()
-
-    for channel in channels:
-        day_files = sorted((export_path / channel["name"]).glob("*.json"))
-        print(f"Parsing channel {channel['name']}, {len(day_files):,} files")
-        for day_file in tqdm(day_files):
-            with open(day_file, "r") as fp:
-                day_data = json.load(fp)
-
-            _df = pd.json_normalize(day_data, sep="__")
-            _df = _df.rename(columns={"user_profile__display_name": "display_name"})
-            if "subtype" not in _df:
-                _df["subtype"] = np.nan
-            _df["text"] = _df["text"].astype(str)
-            _df["channel"] = channel["name"]
-            _df = _df.loc[(_df["type"] == "message") & _df["subtype"].isna()]
-            _df = _df.reindex(columns=cols)
-            df = pd.concat([df, _df], axis="index", ignore_index=True)
-
-        # user display name is nan when a file is attached, fill in the display name
-        missing_mask = df["display_name"].isna()
-        users = (
-            df.dropna(subset="display_name")
-            .groupby(by=["user"])["display_name"]
-            .first()
-        )
-        df.loc[missing_mask, "display_name"] = df.loc[missing_mask, "user"].map(users)
-
-        # number threads
-        thread_id = df.dropna(subset=["thread_ts"]).groupby(by=["thread_ts"]).ngroup()
-        df["thread_id"] = thread_id
-        # fill in -1 for messages that aren't part of threads
-        df["thread_id"] = df["thread_id"].fillna(-1)
-
-        channel_idx = df["channel"] == channel["name"]
-        thread_idx = df["thread_id"] != -1
-        print(f"Channel: {channel['name']}")
-        print(f"\tUsers: {df.loc[channel_idx, 'user'].nunique():,}")
-        print(f"\tMessages: {df.loc[channel_idx].shape[0]:,}")
-        print(f"\tThreads: {df.loc[channel_idx & thread_idx, 'thread_id'].nunique():,}")
-
-        # # number messages in a thread
-        # thread_message_id = (
-        #     df.dropna(subset=["thread_ts"]).groupby(by=["thread_ts"]).cumcount()
-        # )
-        # df["thread_message_id"] = thread_message_id
-
-        # we're going to groupby thread_id to easily collect prompt and response. a
-        # thread's parent message can be the prompt to a completion that wasn't
-        # threaded, or a completion to a prior message. therefore, add a duplicate
-        # message without thread_id
-        thread_parents = df.loc[df["ts"] == df["thread_ts"]].copy()
-        thread_parents["thread_ts"] = np.nan
-        df = pd.concat([df, thread_parents], axis="index", ignore_index=True)
-
-    # augment user tag so Slack will interpret it
-    df["user"] = df["user"].apply(lambda x: f"<@{x}>")
-
-    df = df.sort_values(by=["ts"]).reset_index(drop=True)
-
-    print("Creating prompt and completion...")
     prompt_and_completion = get_prompt_completion(
         df, display_name=display_name, n_prior=n_prior
     )
-    print("\tDone")
 
-    print("Concatenating prompt and completion...")
     cat_pc = concat_prompt_completion(
         prompt_and_completion,
         prepend_channel=prepend_channel,
         prepend_sender=prepend_sender,
         sender_type=sender_type,
     )
-    print("\tDone")
 
-    path_out = export_path / "parser_data" / display_name
-    if not path_out.exists():
-        path_out.mkdir(parents=True, exist_ok=True)
-
-    # save parquet
-    parquet_out = path_out / "prompt_completion.parquet"
-    print(f"Saving file: {parquet_out}")
-    cat_pc.to_parquet(parquet_out)
-    print("\tDone")
-
-    # save jsonl
-    jsonl_out = path_out / "prompt_completion.jsonl"
-    print(f"Saving file: {jsonl_out}")
-    cat_pc[["prompt", "completion"]].to_json(jsonl_out, orient="records", lines=True)
-    print("\tDone")
+    save_data(cat_pc, export_path, display_name)
 
 
 if __name__ == "__main__":
