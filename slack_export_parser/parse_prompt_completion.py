@@ -201,25 +201,36 @@ def main(
 
         df = df.sort_values(by=["ts"]).reset_index(drop=True)
 
-    print("Creating prompt and completion")
+    print("Creating prompt and completion...")
     prompt_and_completion = get_prompt_completion(
         df, display_name=display_name, n_prior=n_prior
     )
-    print("Done")
+    print("\tDone")
 
-    print("Concatenating prompt and completion")
+    print("Concatenating prompt and completion...")
     cat_pc = concat_prompt_completion(
         prompt_and_completion,
         prepend_channel=prepend_channel,
         prepend_sender=prepend_sender,
         sender_type=sender_type,
     )
-    print("Done")
+    print("\tDone")
 
-    filepath_out = export_path / f"{display_name}_prompt_completion.parquet"
-    print(f"Saving file: {filepath_out}")
-    cat_pc.to_parquet(filepath_out)
-    print("Done")
+    path_out = export_path / "data" / display_name
+    if not path_out.exists():
+        path_out.mkdir(parents=True, exist_ok=True)
+
+    # save parquet
+    parquet_out = path_out / "prompt_completion.parquet"
+    print(f"Saving file: {parquet_out}")
+    cat_pc.to_parquet(parquet_out)
+    print("\tDone")
+
+    # save jsonl
+    jsonl_out = path_out / "prompt_completion.jsonl"
+    print(f"Saving file: {jsonl_out}")
+    cat_pc[["prompt", "completion"]].to_json(jsonl_out, orient="records", lines=True)
+    print("\tDone")
 
 
 if __name__ == "__main__":
