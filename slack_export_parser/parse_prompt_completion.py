@@ -108,6 +108,16 @@ def concat_prompt_completion(
         prompts, how="inner", on="prompt_id"
     )
 
+    # append this UID to the end of the prompt
+    assert df_completion[sender_type].unique().shape[0] == 1
+    user = df_completion[sender_type].unique().tolist()[0]
+    df_completion["prompt"] = df_completion["prompt"].apply(lambda x: f"{x} {user}:")
+
+    # append end token to completion
+    df_completion["completion"] = df_completion["completion"].apply(
+        lambda x: f"{x} <e>"
+    )
+
     # final column selection
     cols = ["channel", "ts", "user", "display_name", "completion", "prompt"]
     df_completion = df_completion.reindex(columns=cols)
@@ -171,9 +181,6 @@ def main(
         )
         df.loc[missing_mask, "display_name"] = df.loc[missing_mask, "user"].map(users)
 
-        # augment user tag so Slack will interpret it
-        df["user"] = df["user"].apply(lambda x: f"<@{x}>")
-
         # number threads
         thread_id = df.dropna(subset=["thread_ts"]).groupby(by=["thread_ts"]).ngroup()
         df["thread_id"] = thread_id
@@ -201,7 +208,10 @@ def main(
         thread_parents["thread_ts"] = np.nan
         df = pd.concat([df, thread_parents], axis="index", ignore_index=True)
 
-        df = df.sort_values(by=["ts"]).reset_index(drop=True)
+    # augment user tag so Slack will interpret it
+    df["user"] = df["user"].apply(lambda x: f"<@{x}>")
+
+    df = df.sort_values(by=["ts"]).reset_index(drop=True)
 
     print("Creating prompt and completion...")
     prompt_and_completion = get_prompt_completion(
