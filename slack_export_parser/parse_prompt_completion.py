@@ -61,7 +61,6 @@ def parse_channel_data(export_path: Path, channels: list[dict]):
         # Fill in -1 for messages that aren't part of threads
         channel_df["thread_id"] = channel_df["thread_id"].fillna(-1)
 
-        # channel_idx = channel_df["channel"] == channel["name"]
         thread_idx = channel_df["thread_id"] != -1
         print(f"Channel: {channel['name']}")
         print(f"\tUsers: {channel_df['user'].nunique():,}")
@@ -74,10 +73,10 @@ def parse_channel_data(export_path: Path, channels: list[dict]):
         # )
         # channel_df["thread_message_id"] = thread_message_id
 
-        # We're going to groupby thread_id to easily collect prompt and response. A
-        # thread's parent message can be the prompt to a completion that wasn't
-        # threaded, or a completion to a prior message. therefore, add a duplicate
-        # message without thread_id
+        # We're going to groupby thread_id to collect prompt and response. A thread's
+        # parent message can be the prompt to a completion that wasn't threaded, or a
+        # completion to a prior message. Therefore, add a duplicate message without
+        # thread_id. We will deduplicate later.
         thread_parents = channel_df.loc[
             channel_df["ts"] == channel_df["thread_ts"]
         ].copy()
@@ -202,9 +201,6 @@ def concat_prompt_completion(
     df_completion = df_completion.loc[completion_idx].merge(
         prompts, how="inner", on="prompt_id"
     )
-
-    # assert df_completion[sender_type].unique().shape[0] == 1
-    # PROMPT_END_TOKEN = df_completion[sender_type].unique().tolist()[0]
 
     # Remove any occurrences of the prompt end token
     df_completion["prompt"] = df_completion["prompt"].apply(
