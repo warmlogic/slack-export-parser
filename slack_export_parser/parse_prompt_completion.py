@@ -87,8 +87,6 @@ def concat_prompt_completion(
     if prepend_channel:
         cols = ["channel"] + cols
 
-    # TODO: for sender_type="user", do we need to surround with special characters?
-    # i.e., convert `U01AB2CDE` to `<@U01AB2CDE>`
     _df["prompt"] = (
         _df.loc[prompt_idx, cols].fillna("").apply(lambda x: " ".join(x), axis=1)
     )
@@ -120,10 +118,10 @@ def concat_prompt_completion(
 def main(
     export_dir: str,
     display_name: str,
-    n_prior: int = 2,
+    n_prior: int = 5,
     prepend_channel: bool = True,
     prepend_sender: bool = True,
-    sender_type: str = "display_name",
+    sender_type: str = "user",
 ):
     assert isinstance(n_prior, int)
     assert prepend_channel in [True, False]
@@ -172,6 +170,9 @@ def main(
             .first()
         )
         df.loc[missing_mask, "display_name"] = df.loc[missing_mask, "user"].map(users)
+
+        # augment user tag so Slack will interpret it
+        df["user"] = df["user"].apply(lambda x: f"<@{x}>")
 
         # number threads
         thread_id = df.dropna(subset=["thread_ts"]).groupby(by=["thread_ts"]).ngroup()
